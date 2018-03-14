@@ -20,30 +20,113 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 		struct elfhdr elf_ex;
 		struct elfhdr interp_elf_ex;
 	} *loc;
+```
+定义了loc结构体，其中elfhdr就是 elf32_hdr,定义在/include/linux/elf.h文件中
+```c
+typedef struct elf32_hdr{
+  unsigned char	e_ident[EI_NIDENT];
+  Elf32_Half	e_type;           ELF文件类型,1表示此文件是重定位文件,2表示可执行文件,3表示动态连接库
+  Elf32_Half	e_machine;     CPU类型，它指出了此文件使用何种指令集。如果是Intel 0x386 CPU此值为3
+  Elf32_Word	e_version;     ELF文件版本，为1。
+  Elf32_Addr	e_entry;  /* Entry point */映像的程序入口
+  Elf32_Off	e_phoff;         这个是Program Header offset    程序头位移量
+  Elf32_Off	e_shoff;          这个是Section Header offset       节头偏移量
+  Elf32_Word	e_flags;      处理器特定标志
+  Elf32_Half	e_ehsize;     ELF头部长度
+  Elf32_Half	e_phentsize;    数组元素(表项)的大小
+  Elf32_Half	e_phnum;      Program Header number
+  Elf32_Half	e_shentsize;   数组元素(表项)的大小
+  Elf32_Half	e_shnum;      Section Header number
+  Elf32_Half	e_shstrndx;     节头部字符表索引
+} Elf32_Ehdr;//此结构体一共52个字节
+```
+
+```c
 
 	loc = kmalloc(sizeof(*loc), GFP_KERNEL);
 	if (!loc) {
 		retval = -ENOMEM;
 		goto out_ret;
 	}
-	
+```
+错误代码：ENOMEM：核心内存不足
+```c
+out_ret:
+    return retval;
+void *kmalloc(size_t size, int flags);
+```
+<br/>**size**要分配内存的大小. 以字节为单位.</br>
+<br/>**flags**要分配内存的类型。</br>
+<br/>**kmalloc**函数返回的是虚拟地址(线性地址). kmalloc特殊之处在于它分配的内存是物理上连续的</br>
+<br/>**GFP_KERNEL**是内核内存分配时最常用的，无内存可用时可引起休眠。
+看上去就是给loc分配了一个虚拟地址</br>
+```c
 	/* Get the exec-header */
 	loc->elf_ex = *((struct elfhdr *)bprm->buf);
 
 	retval = -ENOEXEC;
+```
+这种结构是用来装是用来装载二进制时的参数。
+该函数用到了一个类型为**linux_binprm**的结构体来保存要要执行的文件相关的信息
+```c
+struct linux_binprm{
+char buf[BINPRM_BUF_SIZE];    保存可执行文件的头128字节
+#ifdef CONFIG_MMU
+struct vm_area_struct *vma;
+#else
+# define MAX_ARG_PAGES	32
+struct page *page[MAX_ARG_PAGES];
+#endif
+struct mm_struct *mm;
+unsigned long p; /* current top of mem */当前内存页最高地址
+unsigned int
+cred_prepared:1,
+cap_effective:1;
+#ifdef __alpha__
+unsigned int taso:1;
+#endif
+unsigned int recursion_depth;
+struct file * file;     要执行的文件
+struct cred *cred;	/* new credentials */
+int unsafe;	/* how unsafe this exec is (mask of LSM_UNSAFE_*) */
+unsigned int per_clear;	/* bits to clear in current->personality */
+int argc, envc;       命令行参数和环境变量数目
+char * filename;	/* Name of binary as seen by procps */要执行的文件的名称
+char * interp;      要执行的文件的真实名称，通常和filename相同
+unsigned interp_flags;
+unsigned interp_data;
+unsigned long loader, exec;
+};
+```
+保存可执行文件的头128字节到**loc->elf_ex**
+```c
 	/* First of all, some simple consistency checks */
 	if (memcmp(loc->elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
-		goto out;
+		goto out;//out: kfree(loc);
+```
 
+```c
+int memcmp(const void *buf1, const void *buf2, unsigned int count);
+```
+loc->elf_ex.e_ident    确认是否为"\177ELF"的ELF格式文件    SELFMAG是4
+这里\177为8进制，十六进制为0x7f,后面的为'E','L','F'
+```c
 	if (loc->elf_ex.e_type != ET_EXEC && loc->elf_ex.e_type != ET_DYN)
 		goto out;
 	if (!elf_check_arch(&loc->elf_ex))
 		goto out;
 	if (!bprm->file->f_op || !bprm->file->f_op->mmap)
 		goto out;
+```
+**e_type** = **ET_EXEC**为2(可执行文件)  = **ET_DYN**为3(动态链接库文件)
+```c
+#define elf_check_arch(x) ((x)->e_machine == EM_ALPHA	\确认处理器
+```
 
+```c
 	/* Now read in all of the header information */
 	if (loc->elf_ex.e_phentsize != sizeof(struct elf_phdr))
+	//确认e_phentsize 大小
 		goto out;
 	if (loc->elf_ex.e_phnum < 1 ||
 	 	loc->elf_ex.e_phnum > 65536U / sizeof(struct elf_phdr))
@@ -60,8 +143,37 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 		if (retval >= 0)
 			retval = -EIO;
 		goto out_free_ph;
+		//out_free_ph:  kfree(elf_phdata)
 	}
+```
+```c
+int kernel_read(struct file *file, loff_t offset,char *addr, unsigned long count)
+{
+    mm_segment_t old_fs;
+    loff_t pos = offset;
+    int result;
 
+    old_fs = get_fs();
+    set_fs(get_ds());
+    /* The cast to a user pointer is valid due to the set_fs() */
+    result = vfs_read(file, (void __user *)addr, count, &pos);
+    set_fs(old_fs);
+    return result;
+}
+```
+然后就是get_fs了,看名字就是获取当前的地址访问限制值。
+```c
+#define get_fs() (current_thread_info()->addr_limit)
+```
+接下来是set_fs(get_ds())
+```c
+#define get_ds() (KERNEL_DS)
+#define KERNEL_DS ((mm_segment_t) {0UL})
+#define set_fs(x) (current_thred_info()=>addr_limit = (x))
+```
+</br>后面**vfs_read**()应该是内核读取到用户空间吧，放到**addr**的字符串指针？  返回的读取长度？<br/>
+</br>**kernel_read**就是把那个**loc**映像文件的程序表头读入了。<br/>
+```c
 	elf_ppnt = elf_phdata;
 	elf_bss = 0;
 	elf_brk = 0;
